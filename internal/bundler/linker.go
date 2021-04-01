@@ -232,6 +232,14 @@ type jsMeta struct {
 }
 
 type importData struct {
+	// This is an array of intermediate files that re-exported this symbol in a
+	// chain before getting to the final symbol. This can be done either with
+	// "export * from" or "export {} from". If this is done with "export * from"
+	// then this may not be the result of a single chain but may instead form
+	// a diamond shape if this same symbol was re-exported multiple times from
+	// different files.
+	reExportFiles []uint32
+
 	sourceIndex uint32
 	nameLoc     logger.Loc // Optional, goes with sourceIndex, ignore if zero
 	ref         js_ast.Ref
@@ -1896,14 +1904,16 @@ func (c *linkerContext) matchImportsWithExportsForFile(sourceIndex uint32) {
 		c.cycleDetector = c.cycleDetector[:0]
 
 		importRef := js_ast.Ref{OuterIndex: sourceIndex, InnerIndex: uint32(innerIndex)}
-		result := c.matchImportWithExport(importTracker{sourceIndex: sourceIndex, importRef: importRef})
+		result, reExportFiles := c.matchImportWithExport(
+			importTracker{sourceIndex: sourceIndex, importRef: importRef}, sourceIndex, nil)
 		switch result.kind {
 		case matchImportIgnore:
 
 		case matchImportNormal:
 			repr.meta.importsToBind[importRef] = importData{
-				sourceIndex: result.sourceIndex,
-				ref:         result.ref,
+				reExportFiles: reExportFiles,
+				sourceIndex:   result.sourceIndex,
+				ref:           result.ref,
 			}
 
 		case matchImportNamespace:
@@ -1914,8 +1924,9 @@ func (c *linkerContext) matchImportsWithExportsForFile(sourceIndex uint32) {
 
 		case matchImportNormalAndNamespace:
 			repr.meta.importsToBind[importRef] = importData{
-				sourceIndex: result.sourceIndex,
-				ref:         result.ref,
+				reExportFiles: reExportFiles,
+				sourceIndex:   result.sourceIndex,
+				ref:           result.ref,
 			}
 
 			c.symbols.Get(importRef).NamespaceAlias = &js_ast.NamespaceAlias{
@@ -2002,8 +2013,16 @@ type matchImportResult struct {
 	ref              js_ast.Ref
 }
 
-func (c *linkerContext) matchImportWithExport(tracker importTracker) (result matchImportResult) {
+func (c *linkerContext) matchImportWithExport(
+	tracker importTracker,
+	firstSourceIndex uint32,
+	reExportFilesIn []uint32,
+) (
+	result matchImportResult,
+	reExportFiles []uint32,
+) {
 	var ambiguousResults []matchImportResult
+	reExportFiles = reExportFilesIn
 
 loop:
 	for {
@@ -2098,7 +2117,8 @@ loop:
 				// time, so we emit a warning and rewrite the value to the literal
 				// "undefined" instead of emitting an error.
 				symbol.ImportItemStatus = js_ast.ImportItemMissing
-				c.log.AddRangeWarning(&source, r, fmt.Sprintf("Import %q will always be undefined because there is no matching export", namedImport.Alias))
+				c.log.AddRangeWarning(&source, r, fmt.Sprintf(
+					"Import %q will always be undefined because there is no matching export", namedImport.Alias))
 			} else {
 				c.log.AddRangeError(&source, r, fmt.Sprintf("No matching export in %q for import %q",
 					c.files[nextTracker.sourceIndex].source.PrettyPath, namedImport.Alias))
@@ -2115,10 +2135,15 @@ loop:
 			for _, ambiguousTracker := range potentiallyAmbiguousExportStarRefs {
 				// If this is a re-export of another import, follow the import
 				if _, ok := c.files[ambiguousTracker.sourceIndex].repr.(*reprJS).ast.NamedImports[ambiguousTracker.ref]; ok {
-					ambiguousResults = append(ambiguousResults, c.matchImportWithExport(importTracker{
+					// Save and restore the cycle detector to avoid mixing information
+					oldCycleDetector := c.cycleDetector
+					ambiguousResult, newReExportFiles := c.matchImportWithExport(importTracker{
 						sourceIndex: ambiguousTracker.sourceIndex,
 						importRef:   ambiguousTracker.ref,
-					}))
+					}, firstSourceIndex, reExportFiles)
+					c.cycleDetector = oldCycleDetector
+					ambiguousResults = append(ambiguousResults, ambiguousResult)
+					reExportFiles = newReExportFiles
 				} else {
 					ambiguousResults = append(ambiguousResults, matchImportResult{
 						kind:        matchImportNormal,
@@ -2139,6 +2164,15 @@ loop:
 				sourceIndex: nextTracker.sourceIndex,
 				ref:         nextTracker.importRef,
 				nameLoc:     nextTracker.nameLoc,
+			}
+
+			// Keep track of all of the files containing a followed "import" statement
+			// other than the first one. These files will need to be depended upon if
+			// this import is used. Doing this is observable behavior if these files
+			// are marked as having no side effects, because they would otherwise not
+			// be retained.
+			if tracker.sourceIndex != firstSourceIndex {
+				reExportFiles = append(reExportFiles, tracker.sourceIndex)
 			}
 
 			// If this is a re-export of another import, continue for another
@@ -2167,9 +2201,9 @@ loop:
 					nameLoc:          result.nameLoc,
 					otherSourceIndex: ambiguousResult.sourceIndex,
 					otherNameLoc:     ambiguousResult.nameLoc,
-				}
+				}, nil
 			}
-			return matchImportResult{kind: matchImportAmbiguous}
+			return matchImportResult{kind: matchImportAmbiguous}, nil
 		}
 	}
 
