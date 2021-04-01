@@ -1607,10 +1607,19 @@ func (c *linkerContext) scanImportsAndExports() {
 			for _, partIndex := range repr.ast.NamedImports[importRef].LocalPartsWithUses {
 				partMeta := &repr.meta.partMeta[partIndex]
 
+				// Depend on the file containing the imported symbol
 				for _, resolvedPartIndex := range partsDeclaringSymbol {
 					partMeta.nonLocalDependencies = append(partMeta.nonLocalDependencies, nonLocalDependency{
 						sourceIndex: importData.sourceIndex,
 						partIndex:   ast.MakeIndex32(resolvedPartIndex),
+					})
+				}
+
+				// Also depend on any files that re-exported this symbol in between the
+				// file containing the import and the file containing the imported symbol
+				for _, reExportSourceIndex := range importData.reExportFiles {
+					partMeta.nonLocalDependencies = append(partMeta.nonLocalDependencies, nonLocalDependency{
+						sourceIndex: reExportSourceIndex,
 					})
 				}
 			}
