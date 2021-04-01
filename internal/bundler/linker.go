@@ -293,7 +293,7 @@ func (pm *partMeta) isLive() bool {
 
 type nonLocalDependency struct {
 	sourceIndex uint32
-	partIndex   uint32
+	partIndex   ast.Index32 // If missing, this just pulls in the file
 }
 
 type partRange struct {
@@ -1603,7 +1603,7 @@ func (c *linkerContext) scanImportsAndExports() {
 				for _, resolvedPartIndex := range partsDeclaringSymbol {
 					partMeta.nonLocalDependencies = append(partMeta.nonLocalDependencies, nonLocalDependency{
 						sourceIndex: importData.sourceIndex,
-						partIndex:   resolvedPartIndex,
+						partIndex:   ast.MakeIndex32(resolvedPartIndex),
 					})
 				}
 			}
@@ -1771,7 +1771,7 @@ func (c *linkerContext) createExportsForFile(sourceIndex uint32) {
 			// file if it came in through an export star
 			nsExportNonLocalDependencies = append(nsExportNonLocalDependencies, nonLocalDependency{
 				sourceIndex: export.sourceIndex,
-				partIndex:   partIndex,
+				partIndex:   ast.MakeIndex32(partIndex),
 			})
 		}
 	}
@@ -1807,7 +1807,7 @@ func (c *linkerContext) createExportsForFile(sourceIndex uint32) {
 		for _, partIndex := range runtimeRepr.ast.TopLevelSymbolToParts[markAsModuleRef] {
 			nsExportNonLocalDependencies = append(nsExportNonLocalDependencies, nonLocalDependency{
 				sourceIndex: runtime.SourceIndex,
-				partIndex:   partIndex,
+				partIndex:   ast.MakeIndex32(partIndex),
 			})
 		}
 
@@ -1836,7 +1836,7 @@ func (c *linkerContext) createExportsForFile(sourceIndex uint32) {
 		for _, partIndex := range runtimeRepr.ast.TopLevelSymbolToParts[exportRef] {
 			nsExportNonLocalDependencies = append(nsExportNonLocalDependencies, nonLocalDependency{
 				sourceIndex: runtime.SourceIndex,
-				partIndex:   partIndex,
+				partIndex:   ast.MakeIndex32(partIndex),
 			})
 		}
 
@@ -2447,7 +2447,7 @@ func (c *linkerContext) markPartsReachableFromEntryPoints() {
 				for i, partIndex := range commonJSParts {
 					nonLocalDependencies[i] = nonLocalDependency{
 						sourceIndex: runtime.SourceIndex,
-						partIndex:   partIndex,
+						partIndex:   ast.MakeIndex32(partIndex),
 					}
 				}
 				partIndex := c.addPartToFile(sourceIndex, js_ast.Part{
@@ -2491,7 +2491,7 @@ func (c *linkerContext) markPartsReachableFromEntryPoints() {
 				for i, partIndex := range esmParts {
 					nonLocalDependencies[i] = nonLocalDependency{
 						sourceIndex: runtime.SourceIndex,
-						partIndex:   partIndex,
+						partIndex:   ast.MakeIndex32(partIndex),
 					}
 				}
 				partIndex := c.addPartToFile(sourceIndex, js_ast.Part{
@@ -2682,7 +2682,11 @@ func (c *linkerContext) includePart(sourceIndex uint32, partIndex uint32, entryP
 
 	// Also include any non-local dependencies
 	for _, nonLocalDependency := range partMeta.nonLocalDependencies {
-		c.includePart(nonLocalDependency.sourceIndex, nonLocalDependency.partIndex, entryPointBit, distanceFromEntryPoint)
+		if nonLocalDependency.partIndex.IsValid() {
+			c.includePart(nonLocalDependency.sourceIndex, nonLocalDependency.partIndex.GetIndex(), entryPointBit, distanceFromEntryPoint)
+		} else {
+			c.includeFile(nonLocalDependency.sourceIndex, entryPointBit, distanceFromEntryPoint)
+		}
 	}
 
 	// Also include any require() imports
