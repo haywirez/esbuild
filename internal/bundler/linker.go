@@ -232,13 +232,13 @@ type jsMeta struct {
 }
 
 type importData struct {
-	// This is an array of intermediate files that re-exported this symbol in a
-	// chain before getting to the final symbol. This can be done either with
+	// This is an array of intermediate statements that re-exported this symbol
+	// in a chain before getting to the final symbol. This can be done either with
 	// "export * from" or "export {} from". If this is done with "export * from"
 	// then this may not be the result of a single chain but may instead form
 	// a diamond shape if this same symbol was re-exported multiple times from
 	// different files.
-	reExportFiles []uint32
+	reExports []nonLocalDependency
 
 	sourceIndex uint32
 	nameLoc     logger.Loc // Optional, goes with sourceIndex, ignore if zero
@@ -296,7 +296,7 @@ func (pm *partMeta) isLive() bool {
 
 type nonLocalDependency struct {
 	sourceIndex uint32
-	partIndex   ast.Index32 // If missing, this just pulls in the file
+	partIndex   uint32
 }
 
 type partRange struct {
@@ -1611,17 +1611,13 @@ func (c *linkerContext) scanImportsAndExports() {
 				for _, resolvedPartIndex := range partsDeclaringSymbol {
 					partMeta.nonLocalDependencies = append(partMeta.nonLocalDependencies, nonLocalDependency{
 						sourceIndex: importData.sourceIndex,
-						partIndex:   ast.MakeIndex32(resolvedPartIndex),
+						partIndex:   resolvedPartIndex,
 					})
 				}
 
 				// Also depend on any files that re-exported this symbol in between the
 				// file containing the import and the file containing the imported symbol
-				for _, reExportSourceIndex := range importData.reExportFiles {
-					partMeta.nonLocalDependencies = append(partMeta.nonLocalDependencies, nonLocalDependency{
-						sourceIndex: reExportSourceIndex,
-					})
-				}
+				partMeta.nonLocalDependencies = append(partMeta.nonLocalDependencies, importData.reExports...)
 			}
 
 			// Merge these symbols so they will share the same name
@@ -1792,7 +1788,7 @@ func (c *linkerContext) createExportsForFile(sourceIndex uint32) {
 			// file if it came in through an export star
 			nsExportNonLocalDependencies = append(nsExportNonLocalDependencies, nonLocalDependency{
 				sourceIndex: export.sourceIndex,
-				partIndex:   ast.MakeIndex32(partIndex),
+				partIndex:   partIndex,
 			})
 		}
 	}
@@ -1828,7 +1824,7 @@ func (c *linkerContext) createExportsForFile(sourceIndex uint32) {
 		for _, partIndex := range runtimeRepr.ast.TopLevelSymbolToParts[markAsModuleRef] {
 			nsExportNonLocalDependencies = append(nsExportNonLocalDependencies, nonLocalDependency{
 				sourceIndex: runtime.SourceIndex,
-				partIndex:   ast.MakeIndex32(partIndex),
+				partIndex:   partIndex,
 			})
 		}
 
@@ -1857,7 +1853,7 @@ func (c *linkerContext) createExportsForFile(sourceIndex uint32) {
 		for _, partIndex := range runtimeRepr.ast.TopLevelSymbolToParts[exportRef] {
 			nsExportNonLocalDependencies = append(nsExportNonLocalDependencies, nonLocalDependency{
 				sourceIndex: runtime.SourceIndex,
-				partIndex:   ast.MakeIndex32(partIndex),
+				partIndex:   partIndex,
 			})
 		}
 
@@ -1913,16 +1909,16 @@ func (c *linkerContext) matchImportsWithExportsForFile(sourceIndex uint32) {
 		c.cycleDetector = c.cycleDetector[:0]
 
 		importRef := js_ast.Ref{OuterIndex: sourceIndex, InnerIndex: uint32(innerIndex)}
-		result, reExportFiles := c.matchImportWithExport(
-			importTracker{sourceIndex: sourceIndex, importRef: importRef}, sourceIndex, nil)
+		result, reExports := c.matchImportWithExport(
+			importTracker{sourceIndex: sourceIndex, importRef: importRef}, nil)
 		switch result.kind {
 		case matchImportIgnore:
 
 		case matchImportNormal:
 			repr.meta.importsToBind[importRef] = importData{
-				reExportFiles: reExportFiles,
-				sourceIndex:   result.sourceIndex,
-				ref:           result.ref,
+				reExports:   reExports,
+				sourceIndex: result.sourceIndex,
+				ref:         result.ref,
 			}
 
 		case matchImportNamespace:
@@ -1933,9 +1929,9 @@ func (c *linkerContext) matchImportsWithExportsForFile(sourceIndex uint32) {
 
 		case matchImportNormalAndNamespace:
 			repr.meta.importsToBind[importRef] = importData{
-				reExportFiles: reExportFiles,
-				sourceIndex:   result.sourceIndex,
-				ref:           result.ref,
+				reExports:   reExports,
+				sourceIndex: result.sourceIndex,
+				ref:         result.ref,
 			}
 
 			c.symbols.Get(importRef).NamespaceAlias = &js_ast.NamespaceAlias{
@@ -2024,14 +2020,13 @@ type matchImportResult struct {
 
 func (c *linkerContext) matchImportWithExport(
 	tracker importTracker,
-	firstSourceIndex uint32,
-	reExportFilesIn []uint32,
+	reExportsIn []nonLocalDependency,
 ) (
 	result matchImportResult,
-	reExportFiles []uint32,
+	reExports []nonLocalDependency,
 ) {
 	var ambiguousResults []matchImportResult
-	reExportFiles = reExportFilesIn
+	reExports = reExportsIn
 
 loop:
 	for {
@@ -2149,10 +2144,10 @@ loop:
 					ambiguousResult, newReExportFiles := c.matchImportWithExport(importTracker{
 						sourceIndex: ambiguousTracker.sourceIndex,
 						importRef:   ambiguousTracker.ref,
-					}, firstSourceIndex, reExportFiles)
+					}, reExports)
 					c.cycleDetector = oldCycleDetector
 					ambiguousResults = append(ambiguousResults, ambiguousResult)
-					reExportFiles = newReExportFiles
+					reExports = newReExportFiles
 				} else {
 					ambiguousResults = append(ambiguousResults, matchImportResult{
 						kind:        matchImportNormal,
@@ -2175,13 +2170,13 @@ loop:
 				nameLoc:     nextTracker.nameLoc,
 			}
 
-			// Keep track of all of the files containing a followed "import" statement
-			// other than the first one. These files will need to be depended upon if
-			// this import is used. Doing this is observable behavior if these files
-			// are marked as having no side effects, because they would otherwise not
-			// be retained.
-			if tracker.sourceIndex != firstSourceIndex {
-				reExportFiles = append(reExportFiles, tracker.sourceIndex)
+			// Depend on the statement(s) that declared this import symbol in the
+			// original file
+			for _, resolvedPartIndex := range c.files[tracker.sourceIndex].repr.(*reprJS).ast.TopLevelSymbolToParts[tracker.importRef] {
+				reExports = append(reExports, nonLocalDependency{
+					sourceIndex: tracker.sourceIndex,
+					partIndex:   resolvedPartIndex,
+				})
 			}
 
 			// If this is a re-export of another import, continue for another
@@ -2496,7 +2491,7 @@ func (c *linkerContext) markPartsReachableFromEntryPoints() {
 				for i, partIndex := range commonJSParts {
 					nonLocalDependencies[i] = nonLocalDependency{
 						sourceIndex: runtime.SourceIndex,
-						partIndex:   ast.MakeIndex32(partIndex),
+						partIndex:   partIndex,
 					}
 				}
 				partIndex := c.addPartToFile(sourceIndex, js_ast.Part{
@@ -2540,7 +2535,7 @@ func (c *linkerContext) markPartsReachableFromEntryPoints() {
 				for i, partIndex := range esmParts {
 					nonLocalDependencies[i] = nonLocalDependency{
 						sourceIndex: runtime.SourceIndex,
-						partIndex:   ast.MakeIndex32(partIndex),
+						partIndex:   partIndex,
 					}
 				}
 				partIndex := c.addPartToFile(sourceIndex, js_ast.Part{
@@ -2731,11 +2726,7 @@ func (c *linkerContext) includePart(sourceIndex uint32, partIndex uint32, entryP
 
 	// Also include any non-local dependencies
 	for _, nonLocalDependency := range partMeta.nonLocalDependencies {
-		if nonLocalDependency.partIndex.IsValid() {
-			c.includePart(nonLocalDependency.sourceIndex, nonLocalDependency.partIndex.GetIndex(), entryPointBit, distanceFromEntryPoint)
-		} else {
-			c.includeFile(nonLocalDependency.sourceIndex, entryPointBit, distanceFromEntryPoint)
-		}
+		c.includePart(nonLocalDependency.sourceIndex, nonLocalDependency.partIndex, entryPointBit, distanceFromEntryPoint)
 	}
 
 	// Also include any require() imports
