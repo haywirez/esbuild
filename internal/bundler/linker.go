@@ -238,7 +238,7 @@ type importData struct {
 }
 
 type exportData struct {
-	ref js_ast.Ref
+	importData
 
 	// Export star resolution happens first before import resolution. That means
 	// it cannot yet determine if duplicate names from export star resolution are
@@ -262,11 +262,6 @@ type exportData struct {
 	// which are ambiguous. To handle this case, ambiguity resolution must be
 	// deferred until import resolution time. That is done using this array.
 	potentiallyAmbiguousExportStarRefs []importData
-
-	// This is the file that the named export above came from. This will be
-	// different from the file that contains this object if this is a re-export.
-	sourceIndex uint32
-	nameLoc     logger.Loc // Optional, goes with sourceIndex, ignore if zero
 }
 
 // This contains linker-specific metadata corresponding to a "js_ast.Part" struct
@@ -471,9 +466,11 @@ func newLinkerContext(
 			resolvedExports := make(map[string]exportData)
 			for alias, name := range repr.ast.NamedExports {
 				resolvedExports[alias] = exportData{
-					ref:         name.Ref,
-					sourceIndex: sourceIndex,
-					nameLoc:     name.AliasLoc,
+					importData: importData{
+						ref:         name.Ref,
+						sourceIndex: sourceIndex,
+						nameLoc:     name.AliasLoc,
+					},
 				}
 			}
 
@@ -1438,8 +1435,10 @@ func (c *linkerContext) scanImportsAndExports() {
 		// done in this step because it must come after CommonJS module discovery
 		// but before matching imports with exports.
 		repr.meta.resolvedExportStar = &exportData{
-			ref:         repr.ast.ExportsRef,
-			sourceIndex: sourceIndex,
+			importData: importData{
+				ref:         repr.ast.ExportsRef,
+				sourceIndex: sourceIndex,
+			},
 		}
 		repr.ast.TopLevelSymbolToParts[repr.ast.ExportsRef] = []uint32{repr.meta.nsExportPartIndex}
 	}
@@ -1687,7 +1686,12 @@ func (c *linkerContext) generateCodeForLazyExport(sourceIndex uint32) {
 			CanBeRemovedIfUnused: true,
 		}, partMeta{})
 		repr.ast.TopLevelSymbolToParts[ref] = []uint32{partIndex}
-		repr.meta.resolvedExports[alias] = exportData{ref: ref, sourceIndex: sourceIndex}
+		repr.meta.resolvedExports[alias] = exportData{
+			importData: importData{
+				ref:         ref,
+				sourceIndex: sourceIndex,
+			},
+		}
 		part := &repr.ast.Parts[partIndex]
 		for _, export := range prevExports {
 			part.SymbolUses[export.ref] = js_ast.SymbolUse{CountEstimate: 1}
@@ -2285,9 +2289,11 @@ func (c *linkerContext) addExportsForExportStar(
 			if existing, ok := resolvedExports[alias]; !ok {
 				// Initialize the re-export
 				resolvedExports[alias] = exportData{
-					ref:         name.Ref,
-					sourceIndex: otherSourceIndex,
-					nameLoc:     name.AliasLoc,
+					importData: importData{
+						ref:         name.Ref,
+						sourceIndex: otherSourceIndex,
+						nameLoc:     name.AliasLoc,
+					},
 				}
 
 				// Make sure the symbol is marked as imported so that code splitting
